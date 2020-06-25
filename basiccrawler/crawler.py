@@ -30,7 +30,8 @@ except AttributeError:
 LOGGER = logging.basicConfig()
 LOGGER = logging.getLogger('crawler')
 LOGGER.setLevel(logging.WARNING)
-logging.getLogger("cachecontrol.controller").setLevel(logging.ERROR)
+if CACHE_PAGES:
+    logging.getLogger("cachecontrol.controller").setLevel(logging.ERROR)
 logging.getLogger("requests").setLevel(logging.WARNING)
 logging.getLogger("urllib3").setLevel(logging.WARNING)
 
@@ -92,12 +93,15 @@ class BasicCrawler(object):
     START_PAGE = None           # should be defined by subclass
     START_PAGE_CONTEXT = {}     # should be defined by subclass
     IGNORE_URLS = []            # should be defined by subclass
+    SAVE_PAGES = False          # should be defined by subclass
+    CACHE_PAGES = True          # should be defined by subclass
     kind_handlers = {}          # map from web resource kinds and handlers
                                 # e.g. {'LesssonWebResource': self.on_lesson, .. }
 
     # CACHE LOGIC
     SESSION = requests.Session()
-    CACHE = FileCache('.webcache')
+    if CACHE_PAGES:
+        CACHE = FileCache('.webcache')
 
     # queue used keep track of what pages we should crawl next
     queue = None  # instance of queue.Queue created insite `crawl` method
@@ -127,9 +131,10 @@ class BasicCrawler(object):
         # keep track of broken links
         self.broken_links = []
 
-        forever_adapter= CacheControlAdapter(heuristic=CacheForeverHeuristic(), cache=self.CACHE)
-        for source_domain in self.SOURCE_DOMAINS:
-            self.SESSION.mount(source_domain, forever_adapter)   # TODO: change to less aggressive in final version
+        if CACHE_PAGES:
+            forever_adapter= CacheControlAdapter(heuristic=CacheForeverHeuristic(), cache=self.CACHE)
+            for source_domain in self.SOURCE_DOMAINS:
+                self.SESSION.mount(source_domain, forever_adapter)   # TODO: change to less aggressive in final version
 
 
 
@@ -735,4 +740,3 @@ class BasicCrawler(object):
             os.makedirs(parent_dir, exist_ok=True)
         with open(destpath, 'w') as wrt_file:
             json.dump(channel_dict, wrt_file, ensure_ascii=False, indent=2, sort_keys=True)
-
