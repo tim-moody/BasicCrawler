@@ -129,7 +129,7 @@ class BasicCrawler(object):
         if verdict == True:
             self.START_PAGE = head_response.url
         else:
-            raise ValueError('The Starting URL did not return any html.')
+            raise ValueError('The Starting URL ' + self.START_PAGE + ' did not return any html.')
 
         # keep track of broken links
         self.broken_links = []
@@ -200,15 +200,18 @@ class BasicCrawler(object):
         while retries > 0:
             head_response = self.make_request(url, method='HEAD')
             if head_response:
-                if head_response.status_code >=300 and head_response.status_code < 400:
+                if head_response.status_code >=300 and head_response.status_code < 400: # redirect
                     url = head_response.headers['Location']
-                    break
-                content_type = head_response.headers.get('content-type', None)
-                if head_response.status_code == 200 and content_type contains 'text/html;':
-                    return (True, head_response)
+                    continue
+                content_type = head_response.headers.get('Content-Type', None)
                 if not content_type:
-                    LOGGER.warning('HEAD response does not have `content-type` header. url = ' + url)
+                    LOGGER.warning('HEAD response does not have `Content-Type` header. url = ' + url)
                     return (False, None)
+                if head_response.status_code == 200:
+                    if 'text/html' in content_type:
+                        return (True, head_response)
+                    else:
+                        return (False, head_response) # we assme this is media
             else:
                 LOGGER.warning('HEAD request failed for url ' + url)
                 return (False, None)
@@ -264,11 +267,11 @@ class BasicCrawler(object):
         # TODO(ivan): clarify crawl-only-once logic and use of force flag in docs
         url = self.cleanup_url(url)
         if url not in self.global_urls_seen_count.keys() or force:
-            # LOGGER.debug('adding to queue:  url=' + url)
+            LOGGER.debug('adding to queue:  url=' + url)
             self.queue.put((url, context))
         else:
+            LOGGER.debug('Not going to crawl url ' + url + 'beacause previously seen.')
             pass
-            # LOGGER.debug('Not going to crawl url ' + url + 'beacause previously seen.')
         self.global_urls_seen_count[url] += 1
 
     # BASIC PAGE HANDLER
@@ -292,10 +295,11 @@ class BasicCrawler(object):
         # attach this page as another child in parent page
         context['parent']['children'].append(page_dict)
 
-        links = page.find_all('a')
+        links = page.find_all(['a', 'link']) # check for both a and link tags
         for i, link in enumerate(links):
             if link.has_attr('href'):
                 link_url = urljoin(url, link['href'])
+                LOGGER.debug('link_url: ' + link_url)
                 if self.should_ignore_url(link_url):
                     pass
                     # Uncomment three lines below for debugging to record ignored links
@@ -313,12 +317,42 @@ class BasicCrawler(object):
                             media_rsrc_dict['parent'] = context['parent']
                             context['parent']['children'].append(media_rsrc_dict)
                         else:
-                            broken_link_dict = self.create_broken_link_url_dict(original_url)
+                            broken_link_dict = self.create_broken_link_url_dict(link_url)
                             broken_link_dict['parent'] = context['parent']
                             context['parent']['children'].append(broken_link_dict)
             else:
                 pass
                 # LOGGER.debug('a with no nohref found ' + str(link))
+
+        # search for other media
+        elements = page.find_all(['audio', 'embed', 'iframe', 'img', 'input', 'script', 'source', 'track', 'video'])
+        for i, element in enumerate(elements):
+            if element.has_attr('src'):
+                link_url = urljoin(url, element['src'])
+                LOGGER.debug('link_url: ' + link_url)
+                if self.should_ignore_url(link_url):
+                    pass
+                    # Uncomment three lines below for debugging to record ignored links
+                    # ignored_rsrc_dict = self.create_ignored_url_dict(link_url)
+                    # ignored_rsrc_dict['parent'] = page_dict
+                    # page_dict['children'].append(page_dict)
+                else:
+                    verdict, head_response = self.is_html_file(link_url)
+                    if verdict == True: # it's html
+                        LOGGER.warning('Media file returned type html url = ' + url)
+                    else:
+                        if head_response: # link was valid but not html, so assume media
+                            media_rsrc_dict = self.create_media_url_dict(link_url, head_response)
+                            media_rsrc_dict['parent'] = context['parent']
+                            context['parent']['children'].append(media_rsrc_dict)
+                        else:
+                            broken_link_dict = self.create_broken_link_url_dict(link_url)
+                            broken_link_dict['parent'] = context['parent']
+                            context['parent']['children'].append(broken_link_dict)
+            else:
+                pass
+                # LOGGER.debug('a with no nohref found ' + str(link))
+            #  <link rel="stylesheet" href="styles.css">
 
 
     # MAIN LOOP
