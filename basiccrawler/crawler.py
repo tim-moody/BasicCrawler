@@ -124,15 +124,19 @@ class BasicCrawler(object):
         if start_page:
             self.START_PAGE = start_page
 
+        # make resolve any redirects
+        verdict, head_response = self.is_html_file(self.START_PAGE)
+        if verdict == True:
+            self.START_PAGE = head_response.url
+        else:
+            raise ValueError('The Starting URL did not return any html.')
+
         # keep track of broken links
         self.broken_links = []
 
         forever_adapter= CacheControlAdapter(heuristic=CacheForeverHeuristic(), cache=self.CACHE)
         for source_domain in self.SOURCE_DOMAINS:
             self.SESSION.mount(source_domain, forever_adapter)   # TODO: change to less aggressive in final version
-
-
-
 
     # GENERIC URL HELPERS
     ############################################################################
@@ -185,6 +189,31 @@ class BasicCrawler(object):
             if url.startswith(source_domain):
                 found = True
         return not found     # should ignore if not found in SOURCE_DOMAINS list
+
+    def is_html_file(self, url):
+        """
+        Makes a HEAD request for `url` and reuturns (vertict, head_response),
+        where verdict is True if `url` points to a html file
+        Does up to 5 redirects to find url of content-type html
+        """
+        retries = 5
+        while retries > 0:
+            head_response = self.make_request(url, method='HEAD')
+            if head_response:
+                if head_response.status_code >=300 and head_response.status_code < 400:
+                    url = head_response.headers['Location']
+                    break
+                content_type = head_response.headers.get('content-type', None)
+                if head_response.status_code == 200 and content_type contains 'text/html;':
+                    return (True, head_response)
+                if not content_type:
+                    LOGGER.warning('HEAD response does not have `content-type` header. url = ' + url)
+                    return (False, None)
+            else:
+                LOGGER.warning('HEAD request failed for url ' + url)
+                return (False, None)
+        if retries == 0:
+            return (False, None)
 
 
     def is_media_file(self, url):
@@ -242,8 +271,6 @@ class BasicCrawler(object):
             # LOGGER.debug('Not going to crawl url ' + url + 'beacause previously seen.')
         self.global_urls_seen_count[url] += 1
 
-
-
     # BASIC PAGE HANDLER
     ############################################################################
 
@@ -252,6 +279,8 @@ class BasicCrawler(object):
         Basic handler that appends current page to parent's children list and
         adds all links on current page to the crawling queue.
         """
+        # ToDo add assets such as images and css, js
+
         LOGGER.debug('on_page is visiting the URL ' + url)
         page_dict = dict(
             kind='PageWebResource',
@@ -274,7 +303,19 @@ class BasicCrawler(object):
                     # ignored_rsrc_dict['parent'] = page_dict
                     # page_dict['children'].append(page_dict)
                 else:
-                    self.enqueue_url_and_context(link_url, {'parent':page_dict})
+                    verdict, head_response = self.is_html_file(link_url)
+                    if verdict == True: # it's html
+                        real_url = head_response.url
+                        self.enqueue_url_and_context(real_url, {'parent':page_dict})
+                    else:
+                        if head_response: # link was valid but not html, so assume media
+                            media_rsrc_dict = self.create_media_url_dict(link_url, head_response)
+                            media_rsrc_dict['parent'] = context['parent']
+                            context['parent']['children'].append(media_rsrc_dict)
+                        else:
+                            broken_link_dict = self.create_broken_link_url_dict(original_url)
+                            broken_link_dict['parent'] = context['parent']
+                            context['parent']['children'].append(broken_link_dict)
             else:
                 pass
                 # LOGGER.debug('a with no nohref found ' + str(link))
@@ -306,17 +347,12 @@ class BasicCrawler(object):
         while not self.queue_is_empty():
 
             # 1. GET next url to crawl an its context dict
+            # only html will be on queue
             original_url, context = self.get_url_and_context()
 
-            # 2. Media files (PDF/ZIP/MP3) and broken link check
-            verdict, head_response = self.is_media_file(original_url)
-            if verdict == True:
-                media_rsrc_dict = self.create_media_url_dict(original_url, head_response)
-                media_rsrc_dict['parent'] = context['parent']
-                context['parent']['children'].append(media_rsrc_dict)
-                continue
+            # 2. Media files (PDF/ZIP/MP3) and broken link check - done inline in on_page
 
-            # 3. Let's go GET that url
+            # 3. Let's go GET that url - should all go to on_page
             url, page = self.download_page(original_url)
             if page is None:
                 LOGGER.warning('GET ' + original_url + ' did not return page.')
@@ -337,6 +373,7 @@ class BasicCrawler(object):
             handled = False
 
             # A. kind-handler based dispatch logic
+            #    Leaving this, but not sure if it will work (TFM)
             if 'kind' in context:
                 kind = context['kind']
                 if kind in self.kind_handlers:
@@ -355,6 +392,7 @@ class BasicCrawler(object):
                                  + ' so falling back to on_page handler.')
 
             # if none of the above caught it, we use the default on_page handler
+            # expecting this alwasy to fall through (TFM)
             if not handled:
                 self.on_page(url, page, context)
             ####################################################################
@@ -735,4 +773,3 @@ class BasicCrawler(object):
             os.makedirs(parent_dir, exist_ok=True)
         with open(destpath, 'w') as wrt_file:
             json.dump(channel_dict, wrt_file, ensure_ascii=False, indent=2, sort_keys=True)
-
