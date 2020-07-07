@@ -11,6 +11,7 @@ import os
 import queue
 import requests
 import time
+import threading
 from urllib.parse import urljoin, urldefrag, urlparse
 from youtube_dl.utils import std_headers
 
@@ -28,13 +29,25 @@ except AttributeError:
 # LOGGING
 ################################################################################
 LOGGER = logging.basicConfig()
-LOGGER = logging.getLogger('crawler')
-LOGGER.setLevel(logging.WARNING)
+
+def set_log_level(level):
+    global LOGGER
+    if level >= logging.INFO:
+        log_format = '\n\r%(levelname)s:%(name)s:%(message)s'
+    else:
+        log_format = None
+    # reset format
+    for handler in logging.root.handlers[:]:
+        logging.root.removeHandler(handler)
+    LOGGER = logging.basicConfig(format=log_format)
+    LOGGER = logging.getLogger('crawler')
+    LOGGER.setLevel(level)
+
 logging.getLogger("cachecontrol.controller").setLevel(logging.ERROR)
 logging.getLogger("requests").setLevel(logging.WARNING)
 logging.getLogger("urllib3").setLevel(logging.WARNING)
 
-
+set_log_level(logging.WARNING)
 
 # HTTP CACHE
 ################################################################################
@@ -108,7 +121,7 @@ class BasicCrawler(object):
     global_urls_seen_count = defaultdict(int)  # DB of all urls that have ever been seen
     #  { 'http://site.../fullpath?a=b#c': 3, ... }
     urls_visited = {}  # 'http://site.../fullpath?a=b#c' --> 'visited'
-
+    continue_processing_flag = True
 
     def __init__(self, main_source_domain=None, start_page=None):
         if main_source_domain is None and start_page is None:
@@ -207,7 +220,7 @@ class BasicCrawler(object):
                 if not content_type:
                     LOGGER.warning('HEAD response does not have `Content-Type` header. url = ' + url)
                     return (False, None)
-                if head_response.status_code == 200:
+                if head_response.status_code == 200: # does 304 enter into the picture?
                     if 'text/html' in content_type:
                         return (True, head_response)
                     else:
@@ -270,7 +283,7 @@ class BasicCrawler(object):
             LOGGER.debug('adding to queue:  url=' + url)
             self.queue.put((url, context))
         else:
-            LOGGER.debug('Not going to crawl url ' + url + 'beacause previously seen.')
+            LOGGER.debug('Not going to crawl url ' + url + ' because previously seen.')
             pass
         self.global_urls_seen_count[url] += 1
 
@@ -352,7 +365,6 @@ class BasicCrawler(object):
             else:
                 pass
                 # LOGGER.debug('a with no nohref found ' + str(link))
-            #  <link rel="stylesheet" href="styles.css">
 
 
     # MAIN LOOP
@@ -377,10 +389,14 @@ class BasicCrawler(object):
             root_context.update(self.START_PAGE_CONTEXT)
         self.enqueue_url_and_context(start_url, root_context)
 
-        counter = 0
-        while not self.queue_is_empty():
+        threading.Thread(target=self.key_capture_thread, args=(), name='key_capture_thread', daemon=True).start()
+        print('Press the ENTER key to terminate')
 
-            # 1. GET next url to crawl an its context dict
+        counter = 0
+        dot_count = 0
+        while self.continue_processing_flag and not self.queue_is_empty():
+
+            # 1. GET next url to crawl and its context dict
             # only html will be on queue
             original_url, context = self.get_url_and_context()
 
@@ -426,15 +442,24 @@ class BasicCrawler(object):
                                  + ' so falling back to on_page handler.')
 
             # if none of the above caught it, we use the default on_page handler
-            # expecting this alwasy to fall through (TFM)
+            # expecting this always to fall through (TFM)
             if not handled:
                 self.on_page(url, page, context)
+
             ####################################################################
 
             # limit crawling to 1000 pages unless otherwise told (failsafe default)
             counter += 1
             if limit and counter > limit:
                 break
+            # show some output to know we're alive
+            if LOGGER.level >= logging.INFO:
+                if counter % 1 == 0:
+                    print('.', end = '', flush=True)
+                    dot_count += 1
+                    if dot_count == 80:
+                        print('!')
+                        dot_count = 0
 
 
         # remove parent links before output tree
@@ -488,6 +513,10 @@ class BasicCrawler(object):
                 if retry_count >= max_retries:
                     LOGGER.error("FAILED TO RETRIEVE:" + str(url))
                     return None
+            except Exception as e:
+                LOGGER.error("FAILED TO RETRIEVE:" + str(url))
+                LOGGER.error("GOT ERROR: " + str(e))
+                return None
         if response.status_code != 200:
             LOGGER.error("ERROR " + str(response.status_code) + ' when getting url=' + url)
             return None
@@ -807,3 +836,10 @@ class BasicCrawler(object):
             os.makedirs(parent_dir, exist_ok=True)
         with open(destpath, 'w') as wrt_file:
             json.dump(channel_dict, wrt_file, ensure_ascii=False, indent=2, sort_keys=True)
+
+
+    # KEYBOARD CAPTURE
+    ############################################################################
+    def key_capture_thread(self):
+            input()
+            self.continue_processing_flag = False
