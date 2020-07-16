@@ -97,10 +97,11 @@ class BasicCrawler(object):
     ]
 
     GLOBAL_NAV_THRESHOLD = 0.7
+    # subclass should change these
     CRAWLING_STAGE_OUTPUT = 'chefdata/trees/web_resource_tree.json'
     CRAWLING_OUTPUT_URLS = 'chefdata/trees/urls.json'
     CRAWLING_OUTPUT_PAGES = 'chefdata/trees/pages.json'
-    SHORTEN_CRAWL = True # don't revisit pages seen in order to gather statistics
+    SHORTEN_CRAWL = False # if True don't revisit pages seen in order to gather statistics
 
     # Subclass attributes
     MAIN_SOURCE_DOMAIN = None   # should be defined by subclass
@@ -342,13 +343,16 @@ class BasicCrawler(object):
             for i, link in enumerate(links):
                 if link.has_attr('href'):
                     link_url = urljoin(url, link['href'])
-                    children.append(link_url)
+                    if link_url not in children:
+                        children.append(link_url)
             elements = page.find_all(['audio', 'embed', 'iframe', 'img', 'input', 'script', 'source', 'track', 'video'])
             for i, element in enumerate(elements):
                 if element.has_attr('src'):
                     link_url = urljoin(url, element['src'])
-                    children.append(link_url)
+                    if link_url not in children:
+                        children.append(link_url)
 
+            dedup_children = []
             for i, link_url in enumerate(children):
                 LOGGER.debug('link_url: ' + link_url)
                 if self.should_ignore_url(link_url): # should really not ignore 'near' images
@@ -359,22 +363,22 @@ class BasicCrawler(object):
                     # page_dict['children'].append(page_dict)
                 else:
                     is_new_url, content_type, content_length, real_url = self.get_url_type(link_url)
-                    children[i] = real_url # handle any redirects
+                    if real_url not in dedup_children:
+                        dedup_children.append(real_url) # handle any redirects
+                        if content_type == 'text/html': # it's html so queue it for parsing if not in queue
+                            if self.SHORTEN_CRAWL: # don't revisit pages for statistical purposes
+                                if is_new_url: # only queue pages that have never been visited
+                                    self.enqueue_url_and_context(real_url, {'parent':page_dict})
+                            else:
+                                if real_url not in self.global_site_pages: # queue pages that may already be in queue but not yet parsed
+                                    self.enqueue_url_and_context(real_url, {'parent':page_dict})
                     if real_url not in self.global_site_urls:
                         url_attr = {'content-type': content_type, 'content-length': content_length, 'count': 1}
                         self.global_site_urls[real_url] = url_attr
                     else:
                         self.global_site_urls[real_url]['count'] += 1
 
-                    if content_type == 'text/html': # it's html so queue it for parsing if not in queue
-                        if self.SHORTEN_CRAWL: # don't revisit pages for statistical purposes
-                            if is_new_url: # only queue pages that have never been visited
-                                self.enqueue_url_and_context(real_url, {'parent':page_dict})
-                        else:
-                            if real_url not in self.global_site_pages: # queue pages that may already be in queue but not yet parsed
-                                self.enqueue_url_and_context(real_url, {'parent':page_dict})
-
-            self.global_site_pages[url] = {'count': 1, 'children': children}
+            self.global_site_pages[url] = {'count': 1, 'children': dedup_children}
 
             # add page to self.site_struct
 
@@ -749,6 +753,9 @@ class BasicCrawler(object):
             """
             Returns True if `url` is likely a global nav link based on how often seen in pages.
             """
+            if url not in self.global_site_urls: # this should not be necessary but not worth figuring it out
+                return False
+
             seen_count = self.global_site_urls[url]['count']
             if debug:
                 LOGGER.debug('seen_count/total_urls_seen_count='
