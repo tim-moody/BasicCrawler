@@ -233,10 +233,10 @@ class BasicCrawler(object):
             is_new_url = True
             retries = 5
             while retries > 0:
-                head_response = self.make_request(url, method='HEAD')
+                head_response = self.make_request(return_url, method='HEAD')
                 if head_response:
                     if head_response.status_code >=300 and head_response.status_code < 400: # redirect
-                        url = head_response.headers['Location']
+                        return_url = head_response.headers['Location']
                         continue
                     content_type = head_response.headers.get('Content-Type', None)
                     if not content_type:
