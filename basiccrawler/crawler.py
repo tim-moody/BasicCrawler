@@ -210,8 +210,10 @@ class BasicCrawler(object):
 
         # 2. check if url is on one of the specified source domains
         found = False
+        parsedurl = urlparse(url)
         for source_domain in self.SOURCE_DOMAINS:
-            if url.startswith(source_domain):
+            parsedomain = urlparse(source_domain)
+            if parsedurl.netloc == parsedomain.netloc:
                 found = True
         return not found     # should ignore if not found in SOURCE_DOMAINS list
 
@@ -228,6 +230,7 @@ class BasicCrawler(object):
         if url in self.global_site_urls:
             content_type = self.global_site_urls[url]['content-type']
             content_length = self.global_site_urls[url]['content-length']
+            return_url = self.global_site_urls[url]['real-url']
             is_new_url = False
         else:
             is_new_url = True
@@ -252,9 +255,10 @@ class BasicCrawler(object):
                     break
             if retries == 0:
                 content_type = 'broken-link'
-                create_broken_link_url_dict(self, url) # for legacy
+                self.create_broken_link_url_dict(url) # for legacy
             content_type = content_type.split(';')[0] # remove char format
             return_url = self.cleanup_url(return_url)
+
         return (is_new_url, content_type, content_length, return_url)
 
     def is_media_file(self, url):
@@ -354,6 +358,7 @@ class BasicCrawler(object):
 
             dedup_children = []
             for i, link_url in enumerate(children):
+                link_url = self.cleanup_url(link_url) # This is the main place new urls arise
                 LOGGER.debug('link_url: ' + link_url)
                 if self.should_ignore_url(link_url): # should really not ignore 'near' images
                     continue
@@ -363,20 +368,20 @@ class BasicCrawler(object):
                     # page_dict['children'].append(page_dict)
                 else:
                     is_new_url, content_type, content_length, real_url = self.get_url_type(link_url)
-                    if real_url not in dedup_children:
-                        dedup_children.append(real_url) # handle any redirects
+                    if link_url not in dedup_children:
+                        dedup_children.append(link_url) # handle any redirects
                         if content_type == 'text/html': # it's html so queue it for parsing if not in queue
                             if self.SHORTEN_CRAWL: # don't revisit pages for statistical purposes
                                 if is_new_url: # only queue pages that have never been visited
-                                    self.enqueue_url_and_context(real_url, {'parent':page_dict})
+                                    self.enqueue_url_and_context(link_url, {'parent':page_dict})
                             else:
-                                if real_url not in self.global_site_pages: # queue pages that may already be in queue but not yet parsed
-                                    self.enqueue_url_and_context(real_url, {'parent':page_dict})
-                    if real_url not in self.global_site_urls:
-                        url_attr = {'content-type': content_type, 'content-length': content_length, 'count': 1}
-                        self.global_site_urls[real_url] = url_attr
+                                if link_url not in self.global_site_pages: # queue pages that may already be in queue but not yet parsed
+                                    self.enqueue_url_and_context(link_url, {'parent':page_dict})
+                    if link_url not in self.global_site_urls:
+                        url_attr = {'content-type': content_type, 'content-length': content_length, 'real-url': real_url, 'count': 1}
+                        self.global_site_urls[link_url] = url_attr
                     else:
-                        self.global_site_urls[real_url]['count'] += 1
+                        self.global_site_urls[link_url]['count'] += 1
 
             self.global_site_pages[url] = {'count': 1, 'children': dedup_children}
 
@@ -422,8 +427,8 @@ class BasicCrawler(object):
             # 2. Media files (PDF/ZIP/MP3) and broken link check - done inline in on_page
 
             # 3. Let's go GET that url - should all go to on_page
-            url, page = self.download_page(original_url)
-            if page is None:
+            url, html = self.download_page(original_url)
+            if html is None:
                 LOGGER.warning('GET ' + original_url + ' did not return page.')
                 broken_link_dict = self.create_broken_link_url_dict(original_url)
                 broken_link_dict['parent'] = context['parent']
@@ -436,6 +441,9 @@ class BasicCrawler(object):
             # annotate context to keep track of URL befor redirects
             if url != original_url:
                 context['original_url'] = original_url
+
+            page = BeautifulSoup(html, "html.parser")
+            LOGGER.debug('Downloaded page ' + str(url) + ' title:' + self.get_title(page))
 
 
             ##########  HANDLER DISPATCH LOGIC  ################################
@@ -510,9 +518,7 @@ class BasicCrawler(object):
             return (None, None)
         response.encoding = 'utf-8'  # to avoid guessing logic which has a problem parsing https://learningequality.org/directions/
         html = response.text
-        page = BeautifulSoup(html, "html.parser")
-        LOGGER.debug('Downloaded page ' + str(url) + ' title:' + self.get_title(page))
-        return (response.url, page)
+        return (response.url, html)
 
 
     def make_request(self, url, timeout=60, *args, method='GET', **kwargs):
